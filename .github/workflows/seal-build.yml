@@ -1,0 +1,76 @@
+# Build and test log4j 1.2.17 the way the project's own Maven build does it:
+# `mvn verify` compiles with -source/-target 1.4, runs the Ant regression suite
+# (tests/build.xml target runAll) from the maven-antrun-plugin execution bound to
+# the test phase, and packages the OSGi bundle jar. Upstream has no GitHub
+# Actions CI; this workflow was authored for the sealed build.
+name: seal-build
+
+on:
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: "Ant target(s) from tests/build.xml to run instead of the full runAll suite (e.g. 'Core DOM'); empty runs the full suite"
+        required: false
+        default: ""
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      MAVEN_OPTS: -Dhttps.protocols=TLSv1.2 -Xmx1g
+    steps:
+      - uses: actions/checkout@v4
+
+      # setup-java no longer lists Zulu 7, so fetch the last Zulu 7 build directly.
+      - name: Set up JDK 7
+        run: |
+          curl -fsSL https://cdn.azul.com/zulu/bin/zulu7.56.0.11-ca-jdk7.0.352-linux_x64.tar.gz | tar -xz -C "$RUNNER_TEMP"
+          echo "JAVA_HOME=$RUNNER_TEMP/zulu7.56.0.11-ca-jdk7.0.352-linux_x64" >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/zulu7.56.0.11-ca-jdk7.0.352-linux_x64/bin" >> "$GITHUB_PATH"
+
+      - name: Install Maven 3.6.3 (last line that runs on Java 7)
+        run: |
+          curl -fsSL https://archive.apache.org/dist/maven/maven-3/3.6.3/binaries/apache-maven-3.6.3-bin.tar.gz | tar -xz -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/apache-maven-3.6.3/bin" >> "$GITHUB_PATH"
+          mkdir -p ~/.m2
+          # The pom declares the defunct java.net repository; route it to Central.
+          cat > ~/.m2/settings.xml <<'EOF'
+          <settings>
+            <mirrors>
+              <mirror>
+                <id>java-net-to-central</id>
+                <mirrorOf>maven2-repository.dev.java.net</mirrorOf>
+                <url>https://repo.maven.apache.org/maven2</url>
+              </mirror>
+            </mirrors>
+          </settings>
+          EOF
+
+      - name: Versions
+        run: |
+          java -version
+          mvn -v
+
+      - name: Build and test (mvn verify runs tests/build.xml runAll)
+        if: ${{ inputs.test-filter == '' }}
+        run: mvn -B -e verify -Dmaven.site.skip=true
+
+      - name: Build and run selected Ant test targets
+        if: ${{ inputs.test-filter != '' }}
+        run: |
+          curl -fsSL https://archive.apache.org/dist/ant/binaries/apache-ant-1.9.16-bin.tar.gz | tar -xz -C "$RUNNER_TEMP"
+          mvn -B -e test-compile -Dmaven.site.skip=true
+          "$RUNNER_TEMP/apache-ant-1.9.16/bin/ant" -f tests/build.xml \
+            -Dm2_repo="$HOME/.m2/repository" \
+            -Dlog4j.jar="$PWD/target/classes" \
+            -Dproject.lib.home="$PWD/target" \
+            ${{ inputs.test-filter }}
+
+      - name: Upload jar
+        if: ${{ inputs.test-filter == '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: log4j-jar
+          path: target/log4j-1.2.17.jar
+          if-no-files-found: error
